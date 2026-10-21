@@ -105,6 +105,10 @@ sub http_daemon {
 		my $sid = $frame->{sid};
 		my $uri = $frame->{headers}{':path'};
 
+		# the backend handles one request per connection
+
+		$c->h2_goaway(0, $sid, 0);
+
 		if ($uri eq '/') {
 
 			$c->new_stream({ body_more => 1, headers => [

@@ -51,11 +51,6 @@ http {
         location / {
             proxy_pass http://127.0.0.1:8081;
         }
-
-        location /nobuffering {
-            proxy_pass http://127.0.0.1:8081/;
-            proxy_buffering off;
-        }
     }
 
     server {
@@ -75,13 +70,11 @@ http {
 EOF
 
 $t->write_file('index.html', 'SEE-THIS');
-$t->try_run('no proxy_http_version 2')->plan(9);
+$t->try_run('no proxy_http_version 2')->plan(8);
 
 ###############################################################################
 
 like(get('/'), qr/SEE-THIS.*X-Trailer: foo.*bar/si, 'trailers');
-like(get('/nobuffering'), qr/SEE-THIS.*X-Trailer: foo.*bar/si,
-	'trailers nobuffering');
 
 # HTTP/2
 

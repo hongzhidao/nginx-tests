@@ -1,0 +1,35 @@
+Tests for the nginx proxy-v2-multiplex-review development branch
+
+Author: Zhidao HONG
+
+Based on official nginx-tests ec44bc80c4bfac1dbd8ffee3875101285f8502ac.
+Target nginx revision: 726188b60a95bd50c42cfec21dc1ce405c4b0487.
+
+Branch-specific coverage:
+
+- Single-request HTTP/2 backends send GOAWAY to prevent unintended reuse.
+- HTTP/2 fixture flow control flushes queued HEADERS, waits for sufficient
+  connection and stream credit (including padding), and preserves received
+  control frames for subsequent reads.
+- Completed responses survive late RST_STREAM; premature resets and invalid
+  Content-Length still require closure, a protocol error, and no successful
+  response completion.  Partial response prefixes are not fixed by the tests.
+- Unsupported response caching, unbuffered responses, and response rate
+  limiting are covered by configuration rejection tests.  Buffered responses,
+  in-memory subrequests, streaming uploads, trailers, and reuse remain covered.
+
+Run as an ordinary user with an absolute path to the target binary:
+
+    TEST_NGINX_BINARY=/path/to/nginx prove -v h2_testlib.t proxy_h2*.t
+    TEST_NGINX_BINARY=/path/to/nginx prove -j4 .
+
+The validation build enables http_v2, http_ssl, debug, threads, and file_aio.
+The full suite skips modules and external daemons absent from that build.
+
+Validation on 2026-10-21 as zhidao (UID 1000):
+
+- Full suite: 512 files, 4516 assertions, PASS; 236 environment skips.
+- HTTP/2 proxy: 14 files, 210 assertions, PASS with no skips.
+- Fixture library: 17 assertions, PASS; the original library fails this test.
+- Malformed-body checks: 18 assertions each with sendfile, native AIO, and
+  thread AIO, all PASS.  Existing suite TODO expectations remain in effect.

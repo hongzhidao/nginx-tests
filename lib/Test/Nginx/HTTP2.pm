@@ -2,6 +2,7 @@ package Test::Nginx::HTTP2;
 
 # (C) Sergey Kandaurov
 # (C) Nginx, Inc.
+# (C) Zhidao HONG
 
 # Module for nginx HTTP/2 tests.
 
@@ -41,6 +42,7 @@ sub new {
 
 	my $self = bless {
 		buf => '',
+		pending => [],
 		socket => $s, last_stream => -1,
 		dynamic_encode => [ static_table() ],
 		dynamic_decode => [ static_table() ],
@@ -160,12 +162,31 @@ sub h2_body {
 	my $len = length $body;
 	my $sid = $self->{last_stream};
 
-	if ($len > $self->{conn_window} || $len > $self->{streams}{$sid}) {
-		$self->read(all => [{ type => 'WINDOW_UPDATE' }]);
+	my $split = ref $extra->{body_split} && $extra->{body_split} || [];
+	$len += (1 + @$split) * (1 + $extra->{body_padding})
+		if defined $extra->{body_padding};
+
+	# A peer with a zero stream window needs the queued HEADERS before
+	# it can grant response credit.  Keep subsequent writes chained.
+
+	if (($len > $self->{conn_window} || $len > $self->{streams}{$sid})
+		&& $self->{chaining})
+	{
+		$self->send_chain();
+		$self->start_chain();
 	}
 
-	if ($len > $self->{conn_window} || $len > $self->{streams}{$sid}) {
-		return;
+	# Wait for both windows, not just the first WINDOW_UPDATE.  Frames
+	# consumed here must still be available to the fixture's next read().
+
+	while ($len > $self->{conn_window} || $len > $self->{streams}{$sid}) {
+		my $frame = $self->read_frame();
+		return unless $frame;
+		push @{$self->{pending}}, $frame;
+
+		return if $frame->{type} eq 'RST_STREAM' && $frame->{sid} == $sid;
+		return if $frame->{type} eq 'GOAWAY'
+			&& ($frame->{code} || $frame->{last_sid} < $sid);
 	}
 
 	$self->{conn_window} -= $len;
@@ -173,7 +194,6 @@ sub h2_body {
 
 	my $buf;
 
-	my $split = ref $extra->{body_split} && $extra->{body_split} || [];
 	for (@$split) {
 		$buf .= pack_body($self, substr($body, 0, $_, ""), 0x0, $extra);
 	}
@@ -296,45 +316,56 @@ done:
 sub read {
 	my ($self, %extra) = @_;
 	my (@got);
+
+	while (1) {
+		my $frame = @{$self->{pending}} ? shift @{$self->{pending}}
+			: $self->read_frame($extra{wait});
+		last unless $frame;
+		push @got, $frame;
+		last unless $extra{all} && test_fin($frame, $extra{all});
+	}
+	return \@got;
+}
+
+# Decode wire input once, independently of delivery to the test.  In
+# particular, replaying a saved WINDOW_UPDATE must not add credit twice.
+
+sub read_frame {
+	my ($self, $wait) = @_;
 	my $s = $self->{socket};
 	my $buf = $self->{buf};
-	my $wait = $extra{wait};
 
 	local $Data::Dumper::Terse = 1;
 
-	while (1) {
-		$buf = $self->raw_read($buf, 9, $wait);
-		last if length $buf < 9;
-
-		my $length = unpack_length($buf);
-		my $type = unpack('x3C', $buf);
-		my $flags = unpack('x4C', $buf);
-
-		my $stream = unpack "x5 B32", $buf;
-		substr($stream, 0, 1) = 0;
-		$stream = unpack("N", pack("B32", $stream));
-
-		$buf = $self->raw_read($buf, $length + 9, $wait);
-		last if length($buf) < $length + 9;
-
-		$buf = substr($buf, 9);
-
-		my $frame = $cframe{$type}{value}($self, $buf, $length, $flags,
-			$stream);
-		$frame->{length} = $length;
-		$frame->{type} = $cframe{$type}{name};
-		$frame->{flags} = $flags;
-		$frame->{sid} = $stream;
-		push @got, $frame;
-
-		Test::Nginx::log_core('||', $_) for split "\n", Dumper $frame;
-
-		$buf = substr($buf, $length);
-
-		last unless $extra{all} && test_fin($got[-1], $extra{all});
-	};
+	$buf = $self->raw_read($buf, 9, $wait);
 	$self->{buf} = $buf;
-	return \@got;
+	return if length $buf < 9;
+
+	my $length = unpack_length($buf);
+	my $type = unpack('x3C', $buf);
+	my $flags = unpack('x4C', $buf);
+
+	my $stream = unpack "x5 B32", $buf;
+	substr($stream, 0, 1) = 0;
+	$stream = unpack("N", pack("B32", $stream));
+
+	$buf = $self->raw_read($buf, $length + 9, $wait);
+	$self->{buf} = $buf;
+	return if length($buf) < $length + 9;
+
+	$buf = substr($buf, 9);
+
+	my $frame = $cframe{$type}{value}($self, $buf, $length, $flags,
+		$stream);
+	$frame->{length} = $length;
+	$frame->{type} = $cframe{$type}{name};
+	$frame->{flags} = $flags;
+	$frame->{sid} = $stream;
+
+	Test::Nginx::log_core('||', $_) for split "\n", Dumper $frame;
+
+	$self->{buf} = substr($buf, $length);
+	return $frame;
 }
 
 sub raw_read {

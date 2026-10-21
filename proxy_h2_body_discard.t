@@ -54,17 +54,42 @@ EOF
 $t->run_daemon(\&http_daemon);
 $t->waitforsocket('127.0.0.1:' . port(8081));
 
-$t->try_run('no proxy_http_version 2')->plan(5);
+$t->try_run('no proxy_http_version 2')->plan(11);
 
 ###############################################################################
 
 # receiving response with various control frames
 
 like(http_get('/window'), qr/\x0d\x0aSEE-THIS$/s, 'window update');
-like(http_get('/noerror'), qr/\x0d\x0aSEE-THIS$/s, 'rst no error');
-unlike(http_get('/many'), qr/\x0d\x0aSEE-THIS$/s, 'rst no error many');
-unlike(http_get('/error'), qr/\x0d\x0aSEE-THIS$/s, 'rst error');
+like(http_get('/noerror'), qr/\x0d\x0aSEE-THIS$/s,
+	'rst no error after end stream');
+like(http_get('/many'), qr/\x0d\x0aSEE-THIS$/s,
+	'rst no error many after end stream');
+like(http_get('/error'), qr/\x0d\x0aSEE-THIS$/s,
+	'rst error after end stream');
 like(http_get('/ping'), qr/\x0d\x0aSEE-THIS$/s, 'ping');
+
+# a reset before END_STREAM must not complete the response;
+# check the reset error and reject successful chunked response completion
+
+for my $error ('noerror', 'error') {
+	my $code = $error eq 'noerror' ? 0 : 8;
+	my $log = length $t->read_file('error.log');
+	my $s = http(<<EOF, start => 1);
+GET /incomplete/$error HTTP/1.1
+Host: localhost
+Connection: close
+
+EOF
+
+	my $r = $s ? http('', socket => $s) : undef;
+	ok($s && !$s->opened(), "rst $error response closed");
+	like(substr($t->read_file('error.log'), $log),
+		qr/upstream rejected request with error $code\b/,
+		"rst $error incomplete response");
+	unlike($r || '', qr/^HTTP\/1\.1 200 .*\x0d\x0a0\x0d\x0a\x0d\x0a$/s,
+		"rst $error before end stream");
+}
 
 ###############################################################################
 
@@ -92,6 +117,10 @@ sub http_daemon {
 		my ($frame) = grep { $_->{type} eq "HEADERS" } @$frames;
 		my $sid = $frame->{sid};
 		my $uri = $frame->{headers}{':path'};
+
+		# the backend handles one request per connection
+
+		$c->h2_goaway(0, $sid, 0);
 
 		if ($uri eq '/window') {
 			$c->start_chain();
@@ -128,6 +157,16 @@ sub http_daemon {
 			]}, $sid);
 			$c->h2_body('SEE-THIS');
 			$c->h2_rst($sid, 8);
+			$c->send_chain();
+
+		} elsif ($uri =~ m{^/incomplete/(noerror|error)$}) {
+			my $error = $1 eq 'noerror' ? 0 : 8;
+			$c->start_chain();
+			$c->new_stream({ body_more => 1, headers => [
+				{ name => ':status', value => '200' },
+			]}, $sid);
+			$c->h2_body('SEE-THIS', { body_more => 1 });
+			$c->h2_rst($sid, $error);
 			$c->send_chain();
 
 		} elsif ($uri eq '/ping') {

@@ -275,6 +275,10 @@ EOF
 	($frame) = grep { $_->{type} eq "DATA" } @$frames;
 	$buf = $frame->{data};
 
+	# the backend handles one request per connection
+
+	$c->h2_goaway(0, $sid, 0);
+
 	my $f = { preread => $buf };
 	$f->{upload} = sub {
 		my ($body, %extra) = @_;

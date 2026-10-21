@@ -56,11 +56,6 @@ http {
             proxy_pass http://backend;
         }
 
-        location /unbuffered/ {
-            proxy_pass http://backend;
-            proxy_buffering off;
-        }
-
         location /inmemory/ {
             ssi on;
             rewrite ^ /ssi.html break;
@@ -88,15 +83,14 @@ $t->write_file('ssi.html',
 $t->run_daemon(\&http_daemon);
 $t->waitforsocket('127.0.0.1:' . port(8081));
 
-$t->try_run('no proxy_http_version 2')->plan(57);
+$t->try_run('no proxy_http_version 2')->plan(39);
 
 ###############################################################################
 
-# There are 3 mostly independent modes of upstream operation:
+# There are 2 mostly independent modes of upstream operation:
 #
 # 1. Buffered, i.e. normal mode with "proxy_buffering on;"
-# 2. Unbuffered, i.e. "proxy_buffering off;".
-# 3. In memory, i.e. ssi <!--#include ... set -->
+# 2. In memory, i.e. ssi <!--#include ... set -->
 #
 # These all should be tested.
 
@@ -143,50 +137,6 @@ $r =~ m/X-Connection: (\d+)/i; $n = $1;
 like(http_get('/buffered/304len2'), qr/X-Connection: $n/i,
 	'buffered 304 with length 2');
 
-# unbuffered
-
-like($r = http_get('/unbuffered/length1'), qr/SEE-THIS/, 'unbuffered');
-$r =~ m/X-Connection: (\d+)/i; $n = $1;
-like(http_get('/unbuffered/length2'), qr/X-Connection: $n/i, 'unbuffered 2');
-
-like($r = http_get('/unbuffered/chunked1'), qr/SEE-THIS/, 'unbuffered chunked');
-$r =~ m/X-Connection: (\d+)/i; $n = $1;
-like(http_get('/unbuffered/chunked2'), qr/X-Connection: $n/i,
-	'unbuffered chunked 2');
-
-like($r = http_get('/unbuffered/complex1'), qr/(0123456789){100}/,
-	'unbuffered complex chunked');
-$r =~ m/X-Connection: (\d+)/i; $n = $1;
-like(http_get('/unbuffered/complex2'), qr/X-Connection: $n/i,
-	'unbuffered complex chunked 2');
-
-like($r = http_get('/unbuffered/chunk01'), qr/200 OK/, 'unbuffered 0 chunk');
-$r =~ m/X-Connection: (\d+)/i; $n = $1;
-like(http_get('/unbuffered/chunk02'), qr/X-Connection: $n/i,
-	'unbuffered 0 chunk 2');
-
-like($r = http_get('/unbuffered/empty1'), qr/200 OK/, 'unbuffered empty');
-$r =~ m/X-Connection: (\d+)/i; $n = $1;
-like(http_get('/unbuffered/empty2'), qr/X-Connection: $n/i,
-	'unbuffered empty 2');
-
-like($r = http_head('/unbuffered/length/head1'), qr/(?!SEE-THIS)/,
-	'unbuffered head');
-$r =~ m/X-Connection: (\d+)/i; $n = $1;
-like(http_head('/unbuffered/length/head2'), qr/X-Connection: $n/i,
-	'unbuffered head 2');
-
-like($r = http_get('/unbuffered/304nolen1'), qr/304 Not/, 'unbuffered 304');
-$r =~ m/X-Connection: (\d+)/i; $n = $1;
-like(http_get('/unbuffered/304nolen2'), qr/X-Connection: $n/i,
-	'unbuffered 304 2');
-
-like($r = http_get('/unbuffered/304len1'), qr/304 Not/,
-	'unbuffered 304 with length');
-$r =~ m/X-Connection: (\d+)/i; $n = $1;
-like(http_get('/unbuffered/304len2'), qr/X-Connection: $n/i,
-	'unbuffered 304 with length 2');
-
 # in memory
 
 like($r = http_get('/inmemory/length1'), qr/SEE-THIS/, 'inmemory');
@@ -214,8 +164,6 @@ like(http_get('/inmemory/chunk02'), qr/set: $/, 'inmemory 0 chunk 2');
 
 like(http_get('/buffered/closed1'), qr/200 OK/, 'buffered closed 1');
 like(http_get('/buffered/closed2'), qr/200 OK/, 'buffered closed 2');
-like(http_get('/unbuffered/closed1'), qr/200 OK/, 'unbuffered closed 1');
-like(http_get('/unbuffered/closed2'), qr/200 OK/, 'unbuffered closed 2');
 like(http_get('/inmemory/closed1'), qr/200 OK/, 'inmemory closed 1');
 like(http_get('/inmemory/closed2'), qr/200 OK/, 'inmemory closed 2');
 

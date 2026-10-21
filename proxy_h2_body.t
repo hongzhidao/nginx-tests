@@ -2,6 +2,7 @@
 
 # (C) Sergey Kandaurov
 # (C) Nginx, Inc.
+# (C) Zhidao HONG
 
 # Tests for HTTP/2 backend returning response.
 
@@ -37,28 +38,16 @@ events {
 http {
     %%TEST_GLOBALS_HTTP%%
 
-    proxy_cache_path   %%TESTDIR%%/cache  levels=1:2
-                       keys_zone=NAME:1m;
-
     server {
         listen       127.0.0.1:8080;
         server_name  localhost;
 
-        proxy_cache        NAME;
-        proxy_cache_key    $uri;
-        proxy_cache_valid  any 1m;
-
         proxy_http_version 2;
 
-        add_header X-Cache-Status $upstream_cache_status;
         add_trailer X-Stub "";
 
         location / {
             proxy_pass http://127.0.0.1:8081;
-        }
-        location /nobuf {
-            proxy_pass http://127.0.0.1:8081/;
-            proxy_buffering off;
         }
         location /inmemory.html {
             ssi on;
@@ -74,53 +63,45 @@ $t->write_file('inmemory.html',
 $t->run_daemon(\&http_daemon);
 $t->waitforsocket('127.0.0.1:' . port(8081));
 
-$t->try_run('no proxy_http_version 2')->plan(17);
+$t->try_run('no proxy_http_version 2')->plan(16);
 
 ###############################################################################
 
 like(http_get('/'), qr/\x0d\x0aSEE-THIS$/s, 'body');
-like(http_get('/nobuf'), qr/\x0d\x0aSEE-THIS$/s, 'body nobuffering');
 like(http_get('/inmemory.html'), qr/\x0d\x0aSEE-THIS$/s, 'body inmemory');
 
 like(http_get('/padding'), qr/\x0d\x0aSEE-THIS$/s, 'body padding');
 like(http_get('/padding/cl'), qr/\x0d\x0aSEE-THIS$/s, 'body padding length');
 
-# incomplete or extra response body not equal to content-length;
-# no cached response is expected, no final chunk for chunked response
+# A malformed Content-Length must abort the response.  The delivered prefix
+# depends on raw-buffer publication, so check closure, the protocol error,
+# and the absence of a complete successful response instead of a fixed prefix.
 
-TODO: {
-local $TODO = 'not yet' if $t->read_file('nginx.conf') =~ /sendfile on/;
-local $TODO = 'not yet' if $t->read_file('nginx.conf') =~ /aio (on|threads)/;
-
-like(http_get('/less'), qr/Content-Length: 8.*SEE-$/s, 'body less cl');
-like(http_get('/less'), qr/X-Cache-Status: MISS/, 'body less cl cache');
-like(chunked('/less'), qr/SEE-\x0d\x0a$/, 'body less chunked');
-
-like(http_get('/more'), qr/Content-Length: 8.*SEE-$/s, 'body more cl');
-like(http_get('/more'), qr/X-Cache-Status: MISS/, 'body more cl cache');
-like(chunked('/more'), qr/SEE-\x0d\x0a$/, 'body more chunked');
-
-}
-
-like(http_get('/nobuf/less'), qr/Content-Length: 8.*SEE-$/s, 'unbuf less cl');
-like(http_get('/nobuf/less'), qr/X-Cache-Status: MISS/, 'unbuf less cl cache');
-like(chunked('/nobuf/less'), qr/SEE-\x0d\x0a$/, 'unbuf less chunked');
-
-like(http_get('/nobuf/more'), qr/Content-Length: 8.*SEE-$/s, 'unbuf more cl');
-like(http_get('/nobuf/more'), qr/X-Cache-Status: MISS/, 'unbuf more cl cache');
-like(chunked('/nobuf/less'), qr/SEE-\x0d\x0a$/, 'unbuf less chunked');
-
-###############################################################################
-
-sub chunked {
-	my $uri = shift;
-	http(<<EOF);
-GET $uri HTTP/1.1
+for my $case ('less', 'more') {
+	for my $version ('1.0', '1.1') {
+		my $name = "body $case HTTP/$version";
+		my $log = length $t->read_file('error.log');
+		my $s = http(<<EOF, start => 1);
+GET /$case HTTP/$version
 Host: localhost
 Connection: close
 
 EOF
+
+		my $r = $s ? http('', socket => $s) : undef;
+		ok($s && !$s->opened(), "$name closed");
+		like(substr($t->read_file('error.log'), $log),
+			$case eq 'less' ? qr/upstream prematurely closed stream/
+			: qr/upstream sent response body larger than indicated content length/,
+			"$name protocol error");
+		unlike($r || '', $version eq '1.0'
+			? qr/^HTTP\/1\.[01] 200 .*\x0d\x0a\x0d\x0a.{8}/s
+			: qr/^HTTP\/1\.[01] 200 .*\x0d\x0a0\x0d\x0a\x0d\x0a$/s,
+			"$name incomplete");
+	}
 }
+
+###############################################################################
 
 sub http_daemon {
 	my $client;
@@ -146,6 +127,10 @@ sub http_daemon {
 		my ($frame) = grep { $_->{type} eq "HEADERS" } @$frames;
 		my $sid = $frame->{sid};
 		my $uri = $frame->{headers}{':path'};
+
+		# the backend handles one request per connection
+
+		$c->h2_goaway(0, $sid, 0);
 
 		if ($uri eq '/padding') {
 			$c->new_stream({ body_more => 1, headers => [
